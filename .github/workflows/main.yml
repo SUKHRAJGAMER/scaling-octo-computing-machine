@@ -1,4 +1,4 @@
-name: Kase Ho Galaxy Host
+name: Persistent
 
 on:
   workflow_dispatch:
@@ -48,36 +48,27 @@ jobs:
             --hostname=biralo
           echo "✅ Tailscale started"
 
-      - name: Create user biralo with sudo
-        run: |
-          if ! id -u biralo >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash biralo
-            echo "biralo:biralo" | sudo chpasswd
-            sudo usermod -aG sudo biralo
-            echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
-          fi
-
       - name: Show Tailscale IP
         run: |
           echo "🔗 Permanent Tailscale IP:"
           tailscale ip -4
 
-      - name: Keep VPS alive and backup all data
+      - name: Keep VPS alive and backup everything locally
         run: |
           while true; do
             echo "⏳ VPS running... backing up..."
             sudo mkdir -p ./vps-backup
             # Save Tailscale state
             sudo cp /var/lib/tailscale/tailscaled.state ./vps-backup/
-            # Save Pterodactyl data
+            # Save Pterodactyl panel files
             sudo cp -r /var/www/pterodactyl ./vps-backup/ || true
             sudo cp -r /etc/pterodactyl ./vps-backup/ || true
             sudo cp -r /var/lib/pterodactyl ./vps-backup/ || true
-            # Save MariaDB data directly (no password needed)
+            # Save MariaDB raw database files (local-only, no password needed)
             sudo systemctl stop mariadb || true
             sudo cp -r /var/lib/mysql ./vps-backup/mysql || true
             sudo systemctl start mariadb || true
-            # Compress everything
+            # Compress
             zip -r full-backup.zip ./vps-backup
             sleep 3600
           done

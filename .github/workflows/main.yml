@@ -1,9 +1,9 @@
-name: Persistent
+name: Persistent Local VPS
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */6 * * *'  # auto restart every 6h
 
 jobs:
   vps-session:
@@ -12,32 +12,45 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # Install base tools and MariaDB
       - name: Install prerequisites
         run: |
           sudo apt update
-          sudo apt install -y curl unzip sudo net-tools neofetch mariadb-server
+          sudo apt install -y curl unzip sudo net-tools neofetch mariadb-server rsync zip
 
+      # Install Tailscale
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
 
+      # 🔹 Download previous backup (if exists)
+      - name: Download last backup
+        uses: actions/download-artifact@v4
+        with:
+          name: vps-backup
+          path: ./backup
+        continue-on-error: true
+
+      # 🔹 Restore backup contents
       - name: Restore backup files
         run: |
           if [ -f ./backup/full-backup.zip ]; then
-            unzip -o ./backup/full-backup.zip -d /
+            sudo unzip -o ./backup/full-backup.zip -d /
             echo "✅ Backup restored"
           else
             echo "⚠️ No backup found, starting fresh"
           fi
 
+      # 🔹 Restore Tailscale state
       - name: Restore Tailscale state
         run: |
           sudo mkdir -p /var/lib/tailscale
-          if [ -f ./backup/tailscaled.state ]; then
-            sudo cp ./backup/tailscaled.state /var/lib/tailscale/tailscaled.state
+          if [ -f ./vps-backup/tailscaled.state ]; then
+            sudo cp ./vps-backup/tailscaled.state /var/lib/tailscale/tailscaled.state
           fi
           sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
 
+      # 🔹 Start Tailscale
       - name: Start Tailscale
         run: |
           sudo tailscaled &
@@ -48,31 +61,38 @@ jobs:
             --hostname=biralo
           echo "✅ Tailscale started"
 
+      # 🔹 Show permanent IP
       - name: Show Tailscale IP
         run: |
           echo "🔗 Permanent Tailscale IP:"
           tailscale ip -4
 
-      - name: Keep VPS alive and backup everything locally
-        run: |
-          while true; do
-            echo "⏳ VPS running... backing up..."
-            sudo mkdir -p ./vps-backup
-            # Save Tailscale state
-            sudo cp /var/lib/tailscale/tailscaled.state ./vps-backup/
-            # Save Pterodactyl panel files
-            sudo cp -r /var/www/pterodactyl ./vps-backup/ || true
-            sudo cp -r /etc/pterodactyl ./vps-backup/ || true
-            sudo cp -r /var/lib/pterodactyl ./vps-backup/ || true
-            # Save MariaDB raw database files (local-only, no password needed)
-            sudo systemctl stop mariadb || true
-            sudo cp -r /var/lib/mysql ./vps-backup/mysql || true
-            sudo systemctl start mariadb || true
-            # Compress
-            zip -r full-backup.zip ./vps-backup
-            sleep 3600
-          done
+      # 🔹 Keep VPS alive until timeout (6h max)
+      - name: Keep VPS alive
+        run: sleep 21600  # 6h
 
+      # 🔹 Backup everything once before restart
+      - name: Create backup
+        if: always()
+        run: |
+          echo "📦 Creating final backup..."
+          sudo mkdir -p ./vps-backup
+          # Save Tailscale state
+          sudo cp /var/lib/tailscale/tailscaled.state ./vps-backup/
+          # Save Pterodactyl files
+          sudo rsync -a /var/www/pterodactyl ./vps-backup/ || true
+          sudo rsync -a /etc/pterodactyl ./vps-backup/ || true
+          sudo rsync -a /var/lib/pterodactyl ./vps-backup/ || true
+          # Backup MariaDB safely
+          sudo systemctl stop mariadb || true
+          sudo rsync -a /var/lib/mysql ./vps-backup/mysql
+          sudo systemctl start mariadb || true
+          # Compress
+          sudo zip -r full-backup.zip ./vps-backup
+          sudo chown $USER:$USER full-backup.zip
+          echo "✅ Final backup created"
+
+      # 🔹 Upload final backup artifact
       - name: Upload backup
         if: always()
         uses: actions/upload-artifact@v4

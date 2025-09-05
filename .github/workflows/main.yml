@@ -1,9 +1,9 @@
-name: Continuous Persistent VPS
+name: Kase Ho Galaxy Host
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'  # fallback restart every 6 hours
+    - cron: '0 */6 * * *'
 
 jobs:
   vps-session:
@@ -12,13 +12,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set hostname to biralo
-        run: sudo hostnamectl set-hostname biralo
-
       - name: Install prerequisites
         run: |
           sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+          sudo apt install -y curl unzip sudo net-tools neofetch mariadb-server
 
       - name: Install Tailscale
         run: |
@@ -26,17 +23,18 @@ jobs:
 
       - name: Restore backup files
         run: |
-          if [ -f ./backup/backup.zip ]; then
-            unzip -o ./backup/backup.zip -d /
+          if [ -f ./backup/full-backup.zip ]; then
+            unzip -o ./backup/full-backup.zip -d /
+            echo "✅ Backup restored"
           else
-            echo "No backup found, starting fresh"
+            echo "⚠️ No backup found, starting fresh"
           fi
 
       - name: Restore Tailscale state
         run: |
           sudo mkdir -p /var/lib/tailscale
-          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
-            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+          if [ -f ./backup/tailscaled.state ]; then
+            sudo cp ./backup/tailscaled.state /var/lib/tailscale/tailscaled.state
           fi
           sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
 
@@ -44,7 +42,11 @@ jobs:
         run: |
           sudo tailscaled &
           sleep 5
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
+          sudo tailscale up \
+            --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
+            --ssh \
+            --hostname=biralo
+          echo "✅ Tailscale started"
 
       - name: Create user biralo with sudo
         run: |
@@ -55,34 +57,34 @@ jobs:
             echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
 
-      - name: Start tmate session
-        uses: mxschmitt/action-tmate@v3
-
-      - name: Show Tailscale IP and tmate info
+      - name: Show Tailscale IP
         run: |
-          echo "🔗 Tailscale IP:"
-          tailscale ip -4 || echo "Tailscale IP not found"
-          echo ""
-          echo "🔑 tmate SSH session:"
-          cat $HOME/.tmate.sock/ssh
+          echo "🔗 Permanent Tailscale IP:"
+          tailscale ip -4
 
-      - name: Keep VPS alive, backup, and self-restart
+      - name: Keep VPS alive and backup all data
         run: |
           while true; do
-            echo "VPS session running..."
-            sleep 3600  # 1 hour interval
-            echo "Backing up Tailscale state..."
-            sudo mkdir -p /opt/vps-backup/data
-            sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
-            sudo chown -R $USER:$USER /opt/vps-backup
-            zip -r backup.zip /opt/vps-backup
-            # Upload artifact
-            gh workflow run Continuous\ Persistent\ VPS.yml --ref main || true
+            echo "⏳ VPS running... backing up..."
+            sudo mkdir -p ./vps-backup
+            # Save Tailscale state
+            sudo cp /var/lib/tailscale/tailscaled.state ./vps-backup/
+            # Save Pterodactyl data
+            sudo cp -r /var/www/pterodactyl ./vps-backup/ || true
+            sudo cp -r /etc/pterodactyl ./vps-backup/ || true
+            sudo cp -r /var/lib/pterodactyl ./vps-backup/ || true
+            # Save MariaDB data directly (no password needed)
+            sudo systemctl stop mariadb || true
+            sudo cp -r /var/lib/mysql ./vps-backup/mysql || true
+            sudo systemctl start mariadb || true
+            # Compress everything
+            zip -r full-backup.zip ./vps-backup
+            sleep 3600
           done
 
-      - name: Upload VPS backup artifact
+      - name: Upload backup
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
-          path: backup.zip
+          path: full-backup.zip

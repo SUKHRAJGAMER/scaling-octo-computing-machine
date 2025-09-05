@@ -1,111 +1,93 @@
-name: Persistent Local VPS
-
+name: Continuous Persistent VPS
+ 
 on:
-  workflow_dispatch:   # manual start only
-
+  schedule:
+    - cron: '0 */24 * * *'  # Every 6 hours
+  workflow_dispatch:
+ 
 jobs:
   vps-session:
     runs-on: ubuntu-latest
+    timeout-minutes: 140000  # Just under 6 hours
+ 
     steps:
-      # Checkout repo
       - name: Checkout repo
         uses: actions/checkout@v4
-
-      # Install dependencies
-      - name: Install prerequisites
-        run: |
-          sudo apt update
-          sudo apt install -y curl unzip sudo net-tools neofetch mariadb-server rsync zip
-
-      # Install Tailscale
-      - name: Install Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
-
-      # Download last backup (if available)
-      - name: Download last backup
+ 
+      - name: Set hostname to biralo
+        run: sudo hostnamectl set-hostname biralo
+ 
+      - name: Download VPS backup (if any)
         uses: actions/download-artifact@v4
         with:
           name: vps-backup
           path: ./backup
         continue-on-error: true
-
-      # Restore backup files
+ 
+      - name: Install prerequisites
+        run: |
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+ 
+      - name: Install Tailscale official script
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+ 
       - name: Restore backup files
         run: |
-          if [ -f ./backup/full-backup.zip ]; then
-            echo "📂 Extracting backup..."
-            sudo unzip -o ./backup/full-backup.zip -d /
-            echo "✅ Backup restored"
+          if [ -f ./backup/backup.zip ]; then
+            unzip -o ./backup/backup.zip -d /
           else
-            echo "⚠️ No backup found, starting fresh"
+            echo "No backup found, starting fresh"
           fi
-
-      # Restore Tailscale state (for stable IP)
+ 
       - name: Restore Tailscale state
         run: |
-          sudo mkdir -p /var/lib/tailscale
-          if [ -f ./backup/vps-backup/tailscaled.state ]; then
-            echo "📂 Restoring previous Tailscale state"
-            sudo cp ./backup/vps-backup/tailscaled.state /var/lib/tailscale/tailscaled.state
+          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
           fi
-          sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
-
-      # Start VPS loop
-      - name: Run persistent VPS loop
+ 
+      - name: Start Tailscale
         run: |
-          set -e
           sudo tailscaled &
-          sleep 5
-          sudo tailscale up \
-            --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
-            --ssh \
-            --hostname=biralo
-
-          echo "✅ Tailscale started"
-          echo "🔗 Initial IP: $(tailscale ip -4)"
-
-          # Infinite loop: run → backup → restore → compare → restart
-          while true; do
-            echo "⏳ VPS running..."
-            BEFORE=$(tailscale ip -4)
-            echo "📋 Before IP: $BEFORE"
-
-            # Simulate "uptime" (5 minutes session)
-            sleep 300
-
-            # Backup before "restart"
-            echo "📦 Creating backup..."
-            sudo mkdir -p ./vps-backup
-            sudo cp /var/lib/tailscale/tailscaled.state ./vps-backup/ || true
-            sudo rsync -a /var/www/pterodactyl ./vps-backup/ || true
-            sudo rsync -a /etc/pterodactyl ./vps-backup/ || true
-            sudo rsync -a /var/lib/pterodactyl ./vps-backup/ || true
-            sudo systemctl stop mariadb || true
-            sudo rsync -a /var/lib/mysql ./vps-backup/mysql || true
-            sudo systemctl start mariadb || true
-            sudo zip -r full-backup.zip ./vps-backup
-            sudo chown $USER:$USER full-backup.zip
-            echo "✅ Backup complete"
-
-            # Upload backup
-            echo "⬆️ Uploading backup..."
-            curl \
-              -H "authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
-              -H "content-type: application/json" \
-              -H "accept: application/json;api-version=6.0-preview" \
-              -F "file=@full-backup.zip" \
-              "$ACTIONS_RUNTIME_URL/_apis/pipelines/workflows/$GITHUB_RUN_ID/artifacts?artifactName=vps-backup&api-version=6.0-preview"
-
-            # "Restart" simulation
-            AFTER=$(tailscale ip -4)
-            echo "📋 After IP: $AFTER"
-
-            if [ "$BEFORE" = "$AFTER" ]; then
-              echo "✅ Yes, same IP"
-            else
-              echo "❌ No, IP changed"
-            fi
-
-            echo "🔄 Restarting VPS loop again..."
-          done
+          sleep 8
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
+ 
+      - name: Create user biralo with sudo
+        run: |
+          if ! id -u biralo >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash biralo
+            echo "biralo:biralo" | sudo chpasswd
+            sudo usermod -aG sudo biralo
+            echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
+          fi
+ 
+      - name: Start tmate session for SSH access
+        uses: mxschmitt/action-tmate@v3
+ 
+      - name: Show Tailscale IP and tmate info
+        run: |
+          echo "🔗 Tailscale IP:"
+          tailscale ip -4 || echo "Tailscale IP not found"
+          echo ""
+          echo "🔑 tmate SSH session:"
+          cat $HOME/.tmate.sock/ssh
+ 
+      - name: Sleep to keep VPS alive
+        run: sleep 216000  # 6 hours
+ 
+      - name: Backup VPS data and tailscale state
+        run: |
+          sudo mkdir -p /opt/vps-backup/data
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+          sudo chown -R $USER:$USER /opt/vps-backup
+          zip -r backup.zip /opt/vps-backup
+ 
+      - name: Upload VPS backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup
+          path: backup.zip
+ 

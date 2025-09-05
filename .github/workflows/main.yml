@@ -1,38 +1,29 @@
 name: Continuous Persistent VPS
- 
+
 on:
-  schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
   workflow_dispatch:
- 
+  schedule:
+    - cron: '0 */6 * * *'  # fallback restart every 6 hours
+
 jobs:
   vps-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # Just under 6 hours
- 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
- 
+
       - name: Set hostname to biralo
         run: sudo hostnamectl set-hostname biralo
- 
-      - name: Download VPS backup (if any)
-        uses: actions/download-artifact@v4
-        with:
-          name: vps-backup
-          path: ./backup
-        continue-on-error: true
- 
+
       - name: Install prerequisites
         run: |
           sudo apt update
           sudo apt install -y tmate curl unzip sudo net-tools neofetch
- 
-      - name: Install Tailscale official script
+
+      - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
- 
+
       - name: Restore backup files
         run: |
           if [ -f ./backup/backup.zip ]; then
@@ -40,21 +31,21 @@ jobs:
           else
             echo "No backup found, starting fresh"
           fi
- 
+
       - name: Restore Tailscale state
         run: |
+          sudo mkdir -p /var/lib/tailscale
           if [ -f /opt/vps-backup/data/tailscaled.state ]; then
-            sudo mkdir -p /var/lib/tailscale
             sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
           fi
- 
+          sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
+
       - name: Start Tailscale
         run: |
           sudo tailscaled &
-          sleep 8
+          sleep 5
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
- 
+
       - name: Create user biralo with sudo
         run: |
           if ! id -u biralo >/dev/null 2>&1; then
@@ -63,10 +54,10 @@ jobs:
             sudo usermod -aG sudo biralo
             echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
- 
-      - name: Start tmate session for SSH access
+
+      - name: Start tmate session
         uses: mxschmitt/action-tmate@v3
- 
+
       - name: Show Tailscale IP and tmate info
         run: |
           echo "🔗 Tailscale IP:"
@@ -74,18 +65,23 @@ jobs:
           echo ""
           echo "🔑 tmate SSH session:"
           cat $HOME/.tmate.sock/ssh
- 
-      - name: Sleep to keep VPS alive
-        run: sleep 21600  # 6 hours
- 
-      - name: Backup VPS data and tailscale state
+
+      - name: Keep VPS alive, backup, and self-restart
         run: |
-          sudo mkdir -p /opt/vps-backup/data
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
-          sudo chown -R $USER:$USER /opt/vps-backup
-          zip -r backup.zip /opt/vps-backup
- 
+          while true; do
+            echo "VPS session running..."
+            sleep 3600  # 1 hour interval
+            echo "Backing up Tailscale state..."
+            sudo mkdir -p /opt/vps-backup/data
+            sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+            sudo chown -R $USER:$USER /opt/vps-backup
+            zip -r backup.zip /opt/vps-backup
+            # Upload artifact
+            gh workflow run Continuous\ Persistent\ VPS.yml --ref main || true
+          done
+
       - name: Upload VPS backup artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup

@@ -1,18 +1,19 @@
-name: Persistent Local VPS (Test 10m Restart)
+name: Persistent Local VPS
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/10 * * * *'  # auto restart every 10 minutes for testing
+    - cron: "*/5 * * * *"   # restart every 5 minutes
 
 jobs:
   vps-session:
     runs-on: ubuntu-latest
     steps:
+      # Checkout repo
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Install base tools and MariaDB
+      # Install dependencies
       - name: Install prerequisites
         run: |
           sudo apt update
@@ -23,7 +24,7 @@ jobs:
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
 
-      # 🔹 Download previous backup (if exists)
+      # Download last backup (if available)
       - name: Download last backup
         uses: actions/download-artifact@v4
         with:
@@ -31,29 +32,30 @@ jobs:
           path: ./backup
         continue-on-error: true
 
-      # 🔹 Restore backup files
+      # Restore from backup
       - name: Restore backup files
         run: |
           if [ -f ./backup/full-backup.zip ]; then
+            echo "📂 Extracting backup..."
             sudo unzip -o ./backup/full-backup.zip -d /
             echo "✅ Backup restored"
           else
             echo "⚠️ No backup found, starting fresh"
           fi
 
-      # 🔹 Restore Tailscale state correctly
+      # Restore Tailscale state (keeps same IP)
       - name: Restore Tailscale state
         run: |
           sudo mkdir -p /var/lib/tailscale
           if [ -f ./backup/vps-backup/tailscaled.state ]; then
-            echo "✅ Restoring previous Tailscale state"
+            echo "📂 Restoring previous Tailscale state"
             sudo cp ./backup/vps-backup/tailscaled.state /var/lib/tailscale/tailscaled.state
           else
             echo "⚠️ No previous state found, new IP will be assigned"
           fi
           sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
 
-      # 🔹 Start Tailscale
+      # Start Tailscale
       - name: Start Tailscale
         run: |
           sudo tailscaled &
@@ -61,32 +63,20 @@ jobs:
           sudo tailscale up \
             --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
             --ssh \
-            --hostname=Vps
+            --hostname=biralo
           echo "✅ Tailscale started"
 
-      # 🔹 Show and compare Tailscale IP
-      - name: Check Tailscale IP
+      # Show Tailscale IP
+      - name: Show Tailscale IP
         run: |
-          CURRENT_IP=$(tailscale ip -4 | head -n1)
-          echo "🔗 Current Tailscale IP: $CURRENT_IP"
-          if [ -f ./backup/vps-backup/last-ip.txt ]; then
-            LAST_IP=$(cat ./backup/vps-backup/last-ip.txt)
-            if [ "$CURRENT_IP" = "$LAST_IP" ]; then
-              echo "::notice title=IP Check::✅ IP did not change ($CURRENT_IP)"
-            else
-              echo "::warning title=IP Changed::⚠️ Old: $LAST_IP → New: $CURRENT_IP"
-            fi
-          else
-            echo "::notice title=IP Check::ℹ️ First run, no previous IP"
-          fi
-          mkdir -p ./vps-backup
-          echo "$CURRENT_IP" > ./vps-backup/last-ip.txt
+          echo "🔗 Current Tailscale IP:"
+          tailscale ip -4
 
-      # 🔹 Keep VPS alive for 10 minutes only (test mode)
+      # Keep VPS alive until restart
       - name: Keep VPS alive
-        run: sleep 600  # 10 minutes
+        run: sleep 300   # 5 minutes (300 seconds)
 
-      # 🔹 Backup everything once before restart
+      # Create backup before restart
       - name: Create backup
         if: always()
         run: |
@@ -94,7 +84,7 @@ jobs:
           sudo mkdir -p ./vps-backup
           # Save Tailscale state
           sudo cp /var/lib/tailscale/tailscaled.state ./vps-backup/
-          # Save Pterodactyl files
+          # Save Pterodactyl panel files
           sudo rsync -a /var/www/pterodactyl ./vps-backup/ || true
           sudo rsync -a /etc/pterodactyl ./vps-backup/ || true
           sudo rsync -a /var/lib/pterodactyl ./vps-backup/ || true
@@ -107,7 +97,7 @@ jobs:
           sudo chown $USER:$USER full-backup.zip
           echo "✅ Final backup created"
 
-      # 🔹 Upload final backup artifact
+      # Upload backup artifact
       - name: Upload backup
         if: always()
         uses: actions/upload-artifact@v4

@@ -1,9 +1,9 @@
-name: Persistent Local VPS
+name: Persistent Local VPS (Test 10m Restart)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'  # auto restart every 6h
+    - cron: '*/10 * * * *'  # auto restart every 10 minutes for testing
 
 jobs:
   vps-session:
@@ -31,7 +31,7 @@ jobs:
           path: ./backup
         continue-on-error: true
 
-      # 🔹 Restore backup contents
+      # 🔹 Restore backup files
       - name: Restore backup files
         run: |
           if [ -f ./backup/full-backup.zip ]; then
@@ -41,12 +41,15 @@ jobs:
             echo "⚠️ No backup found, starting fresh"
           fi
 
-      # 🔹 Restore Tailscale state
+      # 🔹 Restore Tailscale state correctly
       - name: Restore Tailscale state
         run: |
           sudo mkdir -p /var/lib/tailscale
-          if [ -f ./vps-backup/tailscaled.state ]; then
-            sudo cp ./vps-backup/tailscaled.state /var/lib/tailscale/tailscaled.state
+          if [ -f ./backup/vps-backup/tailscaled.state ]; then
+            echo "✅ Restoring previous Tailscale state"
+            sudo cp ./backup/vps-backup/tailscaled.state /var/lib/tailscale/tailscaled.state
+          else
+            echo "⚠️ No previous state found, new IP will be assigned"
           fi
           sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
 
@@ -58,18 +61,30 @@ jobs:
           sudo tailscale up \
             --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
             --ssh \
-            --hostname=biralo
+            --hostname=Vps
           echo "✅ Tailscale started"
 
-      # 🔹 Show permanent IP
-      - name: Show Tailscale IP
+      # 🔹 Show and compare Tailscale IP
+      - name: Check Tailscale IP
         run: |
-          echo "🔗 Permanent Tailscale IP:"
-          tailscale ip -4
+          CURRENT_IP=$(tailscale ip -4 | head -n1)
+          echo "🔗 Current Tailscale IP: $CURRENT_IP"
+          if [ -f ./backup/vps-backup/last-ip.txt ]; then
+            LAST_IP=$(cat ./backup/vps-backup/last-ip.txt)
+            if [ "$CURRENT_IP" = "$LAST_IP" ]; then
+              echo "::notice title=IP Check::✅ IP did not change ($CURRENT_IP)"
+            else
+              echo "::warning title=IP Changed::⚠️ Old: $LAST_IP → New: $CURRENT_IP"
+            fi
+          else
+            echo "::notice title=IP Check::ℹ️ First run, no previous IP"
+          fi
+          mkdir -p ./vps-backup
+          echo "$CURRENT_IP" > ./vps-backup/last-ip.txt
 
-      # 🔹 Keep VPS alive until timeout (6h max)
+      # 🔹 Keep VPS alive for 10 minutes only (test mode)
       - name: Keep VPS alive
-        run: sleep 21600  # 6h
+        run: sleep 600  # 10 minutes
 
       # 🔹 Backup everything once before restart
       - name: Create backup

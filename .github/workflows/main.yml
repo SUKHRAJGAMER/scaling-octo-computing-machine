@@ -1,9 +1,7 @@
 name: Persistent Local VPS
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"   # restart every 5 minutes
+  workflow_dispatch:   # manual start only
 
 jobs:
   vps-session:
@@ -32,7 +30,7 @@ jobs:
           path: ./backup
         continue-on-error: true
 
-      # Restore from backup
+      # Restore backup files
       - name: Restore backup files
         run: |
           if [ -f ./backup/full-backup.zip ]; then
@@ -43,64 +41,71 @@ jobs:
             echo "⚠️ No backup found, starting fresh"
           fi
 
-      # Restore Tailscale state (keeps same IP)
+      # Restore Tailscale state (for stable IP)
       - name: Restore Tailscale state
         run: |
           sudo mkdir -p /var/lib/tailscale
           if [ -f ./backup/vps-backup/tailscaled.state ]; then
             echo "📂 Restoring previous Tailscale state"
             sudo cp ./backup/vps-backup/tailscaled.state /var/lib/tailscale/tailscaled.state
-          else
-            echo "⚠️ No previous state found, new IP will be assigned"
           fi
           sudo chmod 600 /var/lib/tailscale/tailscaled.state || true
 
-      # Start Tailscale
-      - name: Start Tailscale
+      # Start VPS loop
+      - name: Run persistent VPS loop
         run: |
+          set -e
           sudo tailscaled &
           sleep 5
           sudo tailscale up \
             --authkey ${{ secrets.TAILSCALE_AUTHKEY }} \
             --ssh \
             --hostname=biralo
+
           echo "✅ Tailscale started"
+          echo "🔗 Initial IP: $(tailscale ip -4)"
 
-      # Show Tailscale IP
-      - name: Show Tailscale IP
-        run: |
-          echo "🔗 Current Tailscale IP:"
-          tailscale ip -4
+          # Infinite loop: run → backup → restore → compare → restart
+          while true; do
+            echo "⏳ VPS running..."
+            BEFORE=$(tailscale ip -4)
+            echo "📋 Before IP: $BEFORE"
 
-      # Keep VPS alive until restart
-      - name: Keep VPS alive
-        run: sleep 300   # 5 minutes (300 seconds)
+            # Simulate "uptime" (5 minutes session)
+            sleep 300
 
-      # Create backup before restart
-      - name: Create backup
-        if: always()
-        run: |
-          echo "📦 Creating final backup..."
-          sudo mkdir -p ./vps-backup
-          # Save Tailscale state
-          sudo cp /var/lib/tailscale/tailscaled.state ./vps-backup/
-          # Save Pterodactyl panel files
-          sudo rsync -a /var/www/pterodactyl ./vps-backup/ || true
-          sudo rsync -a /etc/pterodactyl ./vps-backup/ || true
-          sudo rsync -a /var/lib/pterodactyl ./vps-backup/ || true
-          # Backup MariaDB safely
-          sudo systemctl stop mariadb || true
-          sudo rsync -a /var/lib/mysql ./vps-backup/mysql
-          sudo systemctl start mariadb || true
-          # Compress
-          sudo zip -r full-backup.zip ./vps-backup
-          sudo chown $USER:$USER full-backup.zip
-          echo "✅ Final backup created"
+            # Backup before "restart"
+            echo "📦 Creating backup..."
+            sudo mkdir -p ./vps-backup
+            sudo cp /var/lib/tailscale/tailscaled.state ./vps-backup/ || true
+            sudo rsync -a /var/www/pterodactyl ./vps-backup/ || true
+            sudo rsync -a /etc/pterodactyl ./vps-backup/ || true
+            sudo rsync -a /var/lib/pterodactyl ./vps-backup/ || true
+            sudo systemctl stop mariadb || true
+            sudo rsync -a /var/lib/mysql ./vps-backup/mysql || true
+            sudo systemctl start mariadb || true
+            sudo zip -r full-backup.zip ./vps-backup
+            sudo chown $USER:$USER full-backup.zip
+            echo "✅ Backup complete"
 
-      # Upload backup artifact
-      - name: Upload backup
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-backup
-          path: full-backup.zip
+            # Upload backup
+            echo "⬆️ Uploading backup..."
+            curl \
+              -H "authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+              -H "content-type: application/json" \
+              -H "accept: application/json;api-version=6.0-preview" \
+              -F "file=@full-backup.zip" \
+              "$ACTIONS_RUNTIME_URL/_apis/pipelines/workflows/$GITHUB_RUN_ID/artifacts?artifactName=vps-backup&api-version=6.0-preview"
+
+            # "Restart" simulation
+            AFTER=$(tailscale ip -4)
+            echo "📋 After IP: $AFTER"
+
+            if [ "$BEFORE" = "$AFTER" ]; then
+              echo "✅ Yes, same IP"
+            else
+              echo "❌ No, IP changed"
+            fi
+
+            echo "🔄 Restarting VPS loop again..."
+          done

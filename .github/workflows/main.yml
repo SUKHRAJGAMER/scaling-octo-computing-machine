@@ -2,15 +2,15 @@ name: VPS Auto Restart (IPv4 Safe)
 
 on:
   schedule:
-    - cron: '0 */5 * * *' # every 5 hours
-  workflow_dispatch: {}
+    - cron: '0 */5 * * *'   # every 5 hours
+  workflow_dispatch: {}      # manual trigger
 
 jobs:
   restart-vps:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📂 Checkout repo
+      - name: 📂 Checkout repository
         uses: actions/checkout@v4
 
       - name: 🚀 Run maintenance script on VPS (IPv4 only)
@@ -19,13 +19,14 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT }}
+          port: ${{ secrets.SSH_PORT || 22 }}
           script_stop: true
           command_timeout: 30m
           script: |
             set -euo pipefail
             TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 
+            # Fallbacks if secrets are missing
             BACKUP_DIR="${REMOTE_BACKUP_DIR:-/var/backups/github_maintenance}"
             PATHS="${REMOTE_PATHS:-/etc /var/www}"
             KEEP="${KEEP_BACKUPS:-7}"

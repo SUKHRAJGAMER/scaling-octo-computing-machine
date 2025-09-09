@@ -1,4 +1,4 @@
-name: VPS Auto Restart (IPv4 Safe, High Reliability)
+name: VPS 
 
 on:
   schedule:
@@ -14,7 +14,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
-          printf "%s\n" "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -4 -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
@@ -33,7 +33,7 @@ jobs:
 
           echo "[ACTION] Connecting to $TARGET (IPv4 enforced) on port $PORT"
 
-          ssh -4 -i ~/.ssh/id_rsa -p "$PORT" -o StrictHostKeyChecking=yes "$TARGET" 'bash -s' <<'REMOTE_SCRIPT'
+          ssh -4 -i ~/.ssh/id_rsa -p "$PORT" -o StrictHostKeyChecking=yes "$TARGET" bash -s <<'EOF'
 set -euo pipefail
 
 TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
@@ -44,21 +44,17 @@ SRV="${SERVICES:-nginx.service}"
 
 echo "[REMOTE] === VPS Maintenance Started @ $TIMESTAMP ==="
 
-# Ensure backup directory
 mkdir -p "$BACKUP_DIR"
 
-# Create backup
 TARFILE="$BACKUP_DIR/backup-$TIMESTAMP.tar.gz"
 echo "[REMOTE] Creating backup: $TARFILE"
 tar -czf "$TARFILE" $PATHS 2>/dev/null || echo "[WARN] Some files missing in backup"
 
-# Rotate backups
 echo "[REMOTE] Rotating backups (keeping last $KEEP)"
 ls -1t "$BACKUP_DIR"/backup-*.tar.gz 2>/dev/null | sed -n "$((KEEP+1)),\$p" | xargs -r rm --
 
-# Restart services
 for svc in $SRV; do
-  echo "[REMOTE] Processing service: $svc"
+  echo "[REMOTE] Handling service: $svc"
   if systemctl is-active --quiet "$svc"; then
     echo "[REMOTE] Restarting $svc..."
     systemctl restart "$svc"
@@ -68,15 +64,14 @@ for svc in $SRV; do
   fi
 
   if systemctl is-active --quiet "$svc"; then
-    echo "[REMOTE] ✅ $svc is active"
+    echo "[REMOTE] ✅ $svc is running"
   else
     echo "[REMOTE] ❌ $svc failed to start" && exit 2
   fi
 done
 
-# Show current IPv4 (just for confirmation)
 IPV4=$(ip -4 addr show | grep -oP "(?<=inet\\s)\\d+(\\.\\d+){3}" | head -n1 || echo "unknown")
 echo "[REMOTE] Current IPv4: $IPV4"
 
 echo "[REMOTE] === VPS Maintenance Finished @ $TIMESTAMP ==="
-REMOTE_SCRIPT
+EOF

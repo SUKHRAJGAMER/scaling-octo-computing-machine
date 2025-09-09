@@ -1,4 +1,4 @@
-name: VPS Auto Restart (IPv4 Safe)
+name: VPS 
 
 on:
   schedule:
@@ -18,14 +18,22 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -4 -p "${{ secrets.SSH_PORT || 22 }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Run remote maintenance script (IPv4)
+      - name: Test SSH connection
         run: |
           PORT="${{ secrets.SSH_PORT || 22 }}"
           HOST="${{ secrets.SSH_HOST }}"
           USER="${{ secrets.SSH_USER }}"
           TARGET="$USER@$HOST"
 
-          echo "[ACTION] Connecting to $TARGET on port $PORT (IPv4 forced)"
+          echo "[DEBUG] Trying SSH to $TARGET on port $PORT"
+          ssh -vvv -4 -i ~/.ssh/id_rsa -p "$PORT" -o StrictHostKeyChecking=no "$TARGET" "echo '[REMOTE] SSH OK ✅'"
+
+      - name: Run remote maintenance script (IPv4)
+        run: |
+          PORT="${{ secrets.SSH_PORT || 22 }}"
+          HOST="${{ secrets.SSH_HOST }}"
+          USER="${{ secrets.SSH_USER }}"
+          TARGET="$USER@$HOST"
 
           ssh -4 -i ~/.ssh/id_rsa -p "$PORT" -o StrictHostKeyChecking=yes "$TARGET" <<'EOF'
             set -euo pipefail

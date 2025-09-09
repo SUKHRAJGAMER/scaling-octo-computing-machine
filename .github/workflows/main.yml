@@ -2,51 +2,57 @@ name: VPS Auto Restart (IPv4 Safe)
 
 on:
   schedule:
-    - cron: '0 */5 * * *'   # every 5 hours
-  workflow_dispatch: {}
+    # Run every 5 hours
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
 
 jobs:
   restart-vps:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 📂 Checkout repository
-        uses: actions/checkout@v4
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -4 -p "${{ secrets.SSH_PORT || 22 }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: 🚀 Run maintenance script on VPS (IPv4 only)
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST || '127.0.0.1' }}   # 👈 fallback if missing
-          username: ${{ secrets.SSH_USER || 'root' }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          script_stop: true
-          command_timeout: 30m
-          script: |
+      - name: Run remote maintenance script (IPv4)
+        run: |
+          PORT="${{ secrets.SSH_PORT || 22 }}"
+          HOST="${{ secrets.SSH_HOST }}"
+          USER="${{ secrets.SSH_USER }}"
+          TARGET="$USER@$HOST"
+
+          echo "[ACTION] Connecting to $TARGET on port $PORT (IPv4 forced)"
+
+          ssh -4 -i ~/.ssh/id_rsa -p "$PORT" -o StrictHostKeyChecking=yes "$TARGET" <<'EOF'
             set -euo pipefail
+
             TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-
             BACKUP_DIR="${REMOTE_BACKUP_DIR:-/var/backups/github_maintenance}"
-            PATHS="${REMOTE_PATHS:-/etc /var/www}"
-            KEEP="${KEEP_BACKUPS:-7}"
-            SRV="${SERVICES:-nginx.service}"
-
-            echo "[REMOTE] === VPS Maintenance Started @ $TIMESTAMP ==="
-
             mkdir -p "$BACKUP_DIR"
 
-            TARFILE="$BACKUP_DIR/backup-$TIMESTAMP.tar.gz"
-            tar -czf "$TARFILE" $PATHS 2>/dev/null || echo "[WARN] Some files missing in backup"
+            echo "[REMOTE] Backup dir: $BACKUP_DIR"
 
+            TARFILE="$BACKUP_DIR/backup-$TIMESTAMP.tar.gz"
+            tar -czf "$TARFILE" /etc /var/www /home/ubuntu/app/data 2>/dev/null || echo "[WARN] backup warnings"
+
+            KEEP="${KEEP_BACKUPS:-7}"
             ls -1t "$BACKUP_DIR"/backup-*.tar.gz 2>/dev/null | sed -n "$((KEEP+1)),\$p" | xargs -r rm --
 
-            for svc in $SRV; do
+            for svc in nginx.service myapp.service; do
               if systemctl is-active --quiet "$svc"; then
+                echo "[REMOTE] Restarting $svc..."
                 systemctl restart "$svc"
+                systemctl is-active --quiet "$svc" && echo "[REMOTE] $svc is running ✅"
               else
+                echo "[REMOTE] Starting $svc..."
                 systemctl start "$svc"
               fi
             done
 
-            IPV4=$(ip -4 addr show | grep -oP "(?<=inet\\s)\\d+(\\.\\d+){3}" | head -n1 || echo "unknown")
-            echo "[REMOTE] Current IPv4: $IPV4"
+            echo "[REMOTE] IPv4: $(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1)"
+            echo "[REMOTE] Completed at $TIMESTAMP"
+          EOF

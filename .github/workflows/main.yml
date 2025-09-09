@@ -1,4 +1,4 @@
-name: VPS 
+name: VPS Auto Restart (IPv4 Safe)
 
 on:
   schedule:
@@ -10,68 +10,56 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🔑 Prepare SSH key and known_hosts (IPv4)
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -4 -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+      - name: 📂 Checkout repo
+        uses: actions/checkout@v4
 
-      - name: 🚀 Run backup + service restart on VPS (IPv4)
-        env:
-          REMOTE_BACKUP_DIR: ${{ secrets.REMOTE_BACKUP_DIR }}
-          REMOTE_PATHS: ${{ secrets.REMOTE_PATHS }}
-          SERVICES: ${{ secrets.SERVICES }}
-          KEEP_BACKUPS: ${{ secrets.KEEP_BACKUPS }}
-        run: |
-          set -euo pipefail
-          PORT="${{ secrets.SSH_PORT }}"
-          HOST="${{ secrets.SSH_HOST }}"
-          USER="${{ secrets.SSH_USER }}"
-          TARGET="$USER@$HOST"
+      - name: 🚀 Run maintenance script on VPS (IPv4 only)
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script_stop: true
+          command_timeout: 30m
+          script: |
+            set -euo pipefail
+            TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
 
-          echo "[ACTION] Connecting to $TARGET (IPv4 enforced) on port $PORT"
+            BACKUP_DIR="${REMOTE_BACKUP_DIR:-/var/backups/github_maintenance}"
+            PATHS="${REMOTE_PATHS:-/etc /var/www}"
+            KEEP="${KEEP_BACKUPS:-7}"
+            SRV="${SERVICES:-nginx.service}"
 
-          ssh -4 -i ~/.ssh/id_rsa -p "$PORT" -o StrictHostKeyChecking=yes "$TARGET" bash -s <<'EOF'
-set -euo pipefail
+            echo "[REMOTE] === VPS Maintenance Started @ $TIMESTAMP ==="
 
-TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-BACKUP_DIR="${REMOTE_BACKUP_DIR:-/var/backups/github_maintenance}"
-PATHS="${REMOTE_PATHS:-/etc /var/www}"
-KEEP="${KEEP_BACKUPS:-7}"
-SRV="${SERVICES:-nginx.service}"
+            mkdir -p "$BACKUP_DIR"
 
-echo "[REMOTE] === VPS Maintenance Started @ $TIMESTAMP ==="
+            TARFILE="$BACKUP_DIR/backup-$TIMESTAMP.tar.gz"
+            echo "[REMOTE] Creating backup: $TARFILE"
+            tar -czf "$TARFILE" $PATHS 2>/dev/null || echo "[WARN] Some files missing in backup"
 
-mkdir -p "$BACKUP_DIR"
+            echo "[REMOTE] Rotating backups (keeping last $KEEP)"
+            ls -1t "$BACKUP_DIR"/backup-*.tar.gz 2>/dev/null | sed -n "$((KEEP+1)),\$p" | xargs -r rm --
 
-TARFILE="$BACKUP_DIR/backup-$TIMESTAMP.tar.gz"
-echo "[REMOTE] Creating backup: $TARFILE"
-tar -czf "$TARFILE" $PATHS 2>/dev/null || echo "[WARN] Some files missing in backup"
+            for svc in $SRV; do
+              echo "[REMOTE] Handling service: $svc"
+              if systemctl is-active --quiet "$svc"; then
+                echo "[REMOTE] Restarting $svc..."
+                systemctl restart "$svc"
+              else
+                echo "[REMOTE] Starting $svc..."
+                systemctl start "$svc"
+              fi
 
-echo "[REMOTE] Rotating backups (keeping last $KEEP)"
-ls -1t "$BACKUP_DIR"/backup-*.tar.gz 2>/dev/null | sed -n "$((KEEP+1)),\$p" | xargs -r rm --
+              if systemctl is-active --quiet "$svc"; then
+                echo "[REMOTE] ✅ $svc is running"
+              else
+                echo "[REMOTE] ❌ $svc failed to start" && exit 2
+              fi
+            done
 
-for svc in $SRV; do
-  echo "[REMOTE] Handling service: $svc"
-  if systemctl is-active --quiet "$svc"; then
-    echo "[REMOTE] Restarting $svc..."
-    systemctl restart "$svc"
-  else
-    echo "[REMOTE] Starting $svc..."
-    systemctl start "$svc"
-  fi
+            IPV4=$(ip -4 addr show | grep -oP "(?<=inet\\s)\\d+(\\.\\d+){3}" | head -n1 || echo "unknown")
+            echo "[REMOTE] Current IPv4: $IPV4"
 
-  if systemctl is-active --quiet "$svc"; then
-    echo "[REMOTE] ✅ $svc is running"
-  else
-    echo "[REMOTE] ❌ $svc failed to start" && exit 2
-  fi
-done
-
-IPV4=$(ip -4 addr show | grep -oP "(?<=inet\\s)\\d+(\\.\\d+){3}" | head -n1 || echo "unknown")
-echo "[REMOTE] Current IPv4: $IPV4"
-
-echo "[REMOTE] === VPS Maintenance Finished @ $TIMESTAMP ==="
-EOF
+            echo "[REMOTE] === VPS Maintenance Finished @ $TIMESTAMP ==="

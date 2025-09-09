@@ -2,54 +2,77 @@ name: VPS Auto Restart (IPv4 Safe)
 
 on:
   schedule:
-    # Run every 5 hours
-    - cron: "0 */5 * * *"
-  workflow_dispatch: {} # allow manual trigger
+    - cron: '0 */5 * * *'
+  workflow_dispatch: {}
 
 jobs:
-  restart-vps-services:
+  restart-vps:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Setup SSH key
+      - name: Prepare SSH key and known_hosts (IPv4)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          printf "%s\n" "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          # force IPv4 host key scan
-          ssh-keyscan -4 -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Restart Services Safely on VPS
+          HOST="${SSH_HOST}"
+          PORT="${SSH_PORT:-22}"
+          echo "[ACTION] scanning host key for ${HOST}:${PORT} (IPv4)"
+          # tolerate missing host key scan (don't fail the whole job if scan fails)
+          ssh-keyscan -4 -p "$PORT" "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Run safe backup + restart on remote (IPv4)
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          REMOTE_PATHS: ${{ secrets.REMOTE_PATHS }}
+          SERVICES: ${{ secrets.SERVICES }}
+          REMOTE_BACKUP_DIR: ${{ secrets.REMOTE_BACKUP_DIR }}
+          KEEP_BACKUPS: ${{ secrets.KEEP_BACKUPS }}
         run: |
-          ssh -4 -i ~/.ssh/id_rsa -p ${{ secrets.SSH_PORT }} \
-            -o StrictHostKeyChecking=yes \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} <<'EOF'
+          set -euo pipefail
+          PORT="${SSH_PORT:-22}"
+          TARGET="${SSH_USER}@${SSH_HOST}"
+
+          echo "[ACTION] target=${TARGET} port=${PORT} (forcing IPv4)"
+
+          # Pass chosen environment values to the remote shell and run the script there.
+          ssh -4 -i ~/.ssh/id_rsa -p "$PORT" -o StrictHostKeyChecking=yes "$TARGET" \
+            "REMOTE_BACKUP_DIR='${REMOTE_BACKUP_DIR:-/var/backups/github_maintenance}' \
+             REMOTE_PATHS='${REMOTE_PATHS:-/var/www /etc}' \
+             SERVICES='${SERVICES:-}' \
+             KEEP_BACKUPS='${KEEP_BACKUPS:-7}' \
+             bash -s" <<'REMOTE_SCRIPT'
           set -euo pipefail
 
           TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-          BACKUP_DIR="/var/backups/github_maintenance"
+          BACKUP_DIR="${REMOTE_BACKUP_DIR:-/var/backups/github_maintenance}"
           mkdir -p "$BACKUP_DIR"
+          echo "[REMOTE] backup dir: $BACKUP_DIR"
 
-          echo "[INFO] Backing up important data before restart..."
-          # Replace with your real data paths!
-          tar -czf "$BACKUP_DIR/backup-$TIMESTAMP.tar.gz" /etc /var/www /home/ubuntu/app/data 2>/dev/null || true
+          if [ -n "${REMOTE_PATHS:-}" ]; then
+            TARFILE="$BACKUP_DIR/backup-$TIMESTAMP.tar.gz"
+            echo "[REMOTE] Creating backup: $TARFILE"
+            # create compressed tarball; ignore non-fatal warnings
+            tar -czf "$TARFILE" $REMOTE_PATHS 2>/dev/null || echo "[REMOTE][WARN] tar completed with warnings"
+          else
+            echo "[REMOTE][WARN] REMOTE_PATHS is empty - skipping backup"
+          fi
 
-          echo "[INFO] Rotating old backups (keeping last 7)"
-          ls -1t $BACKUP_DIR/backup-*.tar.gz 2>/dev/null | sed -n '8,$p' | xargs -r rm --
+          # rotate backups: keep the newest $KEEP_BACKUPS
+          KEEP="${KEEP_BACKUPS:-7}"
+          echo "[REMOTE] Rotating backups, keeping $KEEP most recent"
+          ls -1t "$BACKUP_DIR"/backup-*.tar.gz 2>/dev/null | sed -n "$((KEEP+1)),\$p" | xargs -r rm --
 
-          echo "[INFO] Restarting services safely..."
-          # replace with your real services
-          for svc in myapp.service nginx.service; do
-            if systemctl is-active --quiet "$svc"; then
-              echo "Restarting $svc..."
-              systemctl restart "$svc"
-              systemctl is-active --quiet "$svc" && echo "$svc is running ✅"
-            else
-              echo "$svc not active, starting..."
-              systemctl start "$svc"
-            fi
-          done
-
-          echo "[INFO] Current IPv4: $(ip -4 addr show | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -n1)"
-          echo "[DONE] VPS maintenance completed at $TIMESTAMP"
-EOF
+          # Safely restart services (no network restart, no reboot)
+          if [ -n "${SERVICES:-}" ]; then
+            for svc in $SERVICES; do
+              echo "[REMOTE] Handling service: $svc"
+              if systemctl is-active --quiet "$svc"; then
+                echo "[REMOTE] Restart

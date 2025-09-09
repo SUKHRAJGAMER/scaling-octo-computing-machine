@@ -1,28 +1,55 @@
-name: vps
+name: VPS Auto Restart (IPv4 Safe)
 
-#Controls when the workflow will run
 on:
-  #Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+  schedule:
+    # Run every 5 hours
+    - cron: "0 */5 * * *"
+  workflow_dispatch: {} # allow manual trigger
 
-  #Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-#A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  #This workflow contains a single job called "build"
-  build:
-    #The type of runner that the job will run on
+  restart-vps-services:
     runs-on: ubuntu-latest
 
-    #Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      #Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-uses: actions/checkout@v4
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # force IPv4 host key scan
+          ssh-keyscan -4 -p ${{ secrets.SSH_PORT }} ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
 
-      #Runs a single command using the runners shell
-name: run vps
-        run: curl -sSf https://sshx.io/get | sh -s run
+      - name: Restart Services Safely on VPS
+        run: |
+          ssh -4 -i ~/.ssh/id_rsa -p ${{ secrets.SSH_PORT }} \
+            -o StrictHostKeyChecking=yes \
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} <<'EOF'
+          set -euo pipefail
+
+          TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
+          BACKUP_DIR="/var/backups/github_maintenance"
+          mkdir -p "$BACKUP_DIR"
+
+          echo "[INFO] Backing up important data before restart..."
+          # Replace with your real data paths!
+          tar -czf "$BACKUP_DIR/backup-$TIMESTAMP.tar.gz" /etc /var/www /home/ubuntu/app/data 2>/dev/null || true
+
+          echo "[INFO] Rotating old backups (keeping last 7)"
+          ls -1t $BACKUP_DIR/backup-*.tar.gz 2>/dev/null | sed -n '8,$p' | xargs -r rm --
+
+          echo "[INFO] Restarting services safely..."
+          # replace with your real services
+          for svc in myapp.service nginx.service; do
+            if systemctl is-active --quiet "$svc"; then
+              echo "Restarting $svc..."
+              systemctl restart "$svc"
+              systemctl is-active --quiet "$svc" && echo "$svc is running ✅"
+            else
+              echo "$svc not active, starting..."
+              systemctl start "$svc"
+            fi
+          done
+
+          echo "[INFO] Current IPv4: $(ip -4 addr show | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -n1)"
+          echo "[DONE] VPS maintenance completed at $TIMESTAMP"
+EOF

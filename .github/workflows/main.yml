@@ -11,68 +11,52 @@ jobs:
 
     steps:
       - name: Prepare SSH key and known_hosts (IPv4)
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
           printf "%s\n" "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-
-          HOST="${SSH_HOST}"
-          PORT="${SSH_PORT:-22}"
-          echo "[ACTION] scanning host key for ${HOST}:${PORT} (IPv4)"
-          # tolerate missing host key scan (don't fail the whole job if scan fails)
-          ssh-keyscan -4 -p "$PORT" "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -4 -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Run safe backup + restart on remote (IPv4)
-        env:
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
-          REMOTE_PATHS: ${{ secrets.REMOTE_PATHS }}
-          SERVICES: ${{ secrets.SERVICES }}
-          REMOTE_BACKUP_DIR: ${{ secrets.REMOTE_BACKUP_DIR }}
-          KEEP_BACKUPS: ${{ secrets.KEEP_BACKUPS }}
         run: |
           set -euo pipefail
-          PORT="${SSH_PORT:-22}"
-          TARGET="${SSH_USER}@${SSH_HOST}"
+          PORT="${{ secrets.SSH_PORT }}"
+          HOST="${{ secrets.SSH_HOST }}"
+          USER="${{ secrets.SSH_USER }}"
+          TARGET="$USER@$HOST"
 
-          echo "[ACTION] target=${TARGET} port=${PORT} (forcing IPv4)"
+          echo "[ACTION] target=$TARGET port=$PORT (forcing IPv4)"
 
-          # Pass chosen environment values to the remote shell and run the script there.
-          ssh -4 -i ~/.ssh/id_rsa -p "$PORT" -o StrictHostKeyChecking=yes "$TARGET" \
-            "REMOTE_BACKUP_DIR='${REMOTE_BACKUP_DIR:-/var/backups/github_maintenance}' \
-             REMOTE_PATHS='${REMOTE_PATHS:-/var/www /etc}' \
-             SERVICES='${SERVICES:-}' \
-             KEEP_BACKUPS='${KEEP_BACKUPS:-7}' \
-             bash -s" <<'REMOTE_SCRIPT'
-          set -euo pipefail
+          ssh -4 -i ~/.ssh/id_rsa -p "$PORT" -o StrictHostKeyChecking=yes "$TARGET" 'bash -s' <<'REMOTE_SCRIPT'
+set -euo pipefail
 
-          TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-          BACKUP_DIR="${REMOTE_BACKUP_DIR:-/var/backups/github_maintenance}"
-          mkdir -p "$BACKUP_DIR"
-          echo "[REMOTE] backup dir: $BACKUP_DIR"
+TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
+BACKUP_DIR="${REMOTE_BACKUP_DIR:-/var/backups/github_maintenance}"
+mkdir -p "$BACKUP_DIR"
 
-          if [ -n "${REMOTE_PATHS:-}" ]; then
-            TARFILE="$BACKUP_DIR/backup-$TIMESTAMP.tar.gz"
-            echo "[REMOTE] Creating backup: $TARFILE"
-            # create compressed tarball; ignore non-fatal warnings
-            tar -czf "$TARFILE" $REMOTE_PATHS 2>/dev/null || echo "[REMOTE][WARN] tar completed with warnings"
-          else
-            echo "[REMOTE][WARN] REMOTE_PATHS is empty - skipping backup"
-          fi
+echo "[REMOTE] Backup dir: $BACKUP_DIR"
 
-          # rotate backups: keep the newest $KEEP_BACKUPS
-          KEEP="${KEEP_BACKUPS:-7}"
-          echo "[REMOTE] Rotating backups, keeping $KEEP most recent"
-          ls -1t "$BACKUP_DIR"/backup-*.tar.gz 2>/dev/null | sed -n "$((KEEP+1)),\$p" | xargs -r rm --
+# backup important paths
+TARFILE="$BACKUP_DIR/backup-$TIMESTAMP.tar.gz"
+tar -czf "$TARFILE" /etc /var/www /home/ubuntu/app/data 2>/dev/null || echo "[WARN] backup warnings"
 
-          # Safely restart services (no network restart, no reboot)
-          if [ -n "${SERVICES:-}" ]; then
-            for svc in $SERVICES; do
-              echo "[REMOTE] Handling service: $svc"
-              if systemctl is-active --quiet "$svc"; then
-                echo "[REMOTE] Restart
+# rotate backups
+KEEP="${KEEP_BACKUPS:-7}"
+ls -1t "$BACKUP_DIR"/backup-*.tar.gz 2>/dev/null | sed -n "$((KEEP+1)),\$p" | xargs -r rm --
+
+# restart services
+for svc in nginx.service myapp.service; do
+  if systemctl is-active --quiet "$svc"; then
+    echo "[REMOTE] Restarting $svc..."
+    systemctl restart "$svc"
+    systemctl is-active --quiet "$svc" && echo "[REMOTE] $svc is running ✅"
+  else
+    echo "[REMOTE] Starting $svc..."
+    systemctl start "$svc"
+  fi
+done
+
+echo "[REMOTE] IPv4: $(ip -4 addr show | grep -oP "(?<=inet\\s)\\d+(\\.\\d+){3}" | head -n1)"
+echo "[REMOTE] Completed at $TIMESTAMP"
+REMOTE_SCRIPT
